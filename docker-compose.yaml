@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # 后端服务
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cyber-replay-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/results:/app/results
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - cyber-replay-net
+      - sandbox-net
+    restart: unless-stopped
+
+  # 前端服务
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: cyber-replay-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - cyber-replay-net
+    restart: unless-stopped
+
+  # 沙箱环境（用于流量重放）
+  sandbox:
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile
+    container_name: cyber-replay-sandbox
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      - sandbox-net
+    restart: unless-stopped
+
+networks:
+  # 主网络（前端-后端通信）
+  cyber-replay-net:
+    driver: bridge
+  
+  # 沙箱网络（隔离的流量重放环境）
+  sandbox-net:
+    driver: bridge
+    internal: true  # 完全隔离，无外部访问
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  uploads:
+  results:
