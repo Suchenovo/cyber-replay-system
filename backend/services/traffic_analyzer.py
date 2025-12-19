@@ -1,6 +1,5 @@
 from scapy.all import rdpcap, IP, TCP, UDP, ICMP
 from collections import defaultdict, Counter
-import pandas as pd
 from datetime import datetime
 
 

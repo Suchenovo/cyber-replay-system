@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 
 from routers import pcap_router, replay_router, analysis_router
+from database import Base, engine
 
 app = FastAPI(title="网络攻击复现与分析系统", version="1.0.0")
 
@@ -23,6 +24,9 @@ UPLOAD_DIR = Path("uploads")
 RESULTS_DIR = Path("results")
 UPLOAD_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
+
+# 初始化数据库表
+Base.metadata.create_all(bind=engine)
 
 # 注册路由
 app.include_router(pcap_router.router, prefix="/api/pcap", tags=["PCAP管理"])

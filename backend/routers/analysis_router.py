@@ -1,9 +1,13 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from pathlib import Path
 from typing import Optional
+from sqlalchemy.orm import Session
+import json
 
 from services.traffic_analyzer import TrafficAnalyzer
+from database import get_db
+from models import AnalysisSnapshot
 
 router = APIRouter()
 
@@ -16,7 +20,7 @@ class AnalysisRequest(BaseModel):
 
 
 @router.post("/analyze")
-async def analyze_traffic(request: AnalysisRequest):
+async def analyze_traffic(request: AnalysisRequest, db: Session = Depends(get_db)):
     """分析流量数据"""
     # 查找文件
     file_path = None
@@ -42,6 +46,19 @@ async def analyze_traffic(request: AnalysisRequest):
             result = analyzer.analyze_flows()
         else:
             raise HTTPException(status_code=400, detail="不支持的分析类型")
+
+        # 持久化分析快照（简化：所有类型均保存）
+        try:
+            snapshot = AnalysisSnapshot(
+                file_id=request.file_id,
+                analysis_type=request.analysis_type,
+                payload=json.dumps(result, ensure_ascii=False),
+            )
+            db.add(snapshot)
+            db.commit()
+        except Exception:
+            # 不因持久化失败而影响分析返回
+            db.rollback()
 
         return result
     except Exception as e:

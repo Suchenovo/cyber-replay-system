@@ -3,4 +3,4 @@ uvicorn
 python-multipart
 scapy
 docker
-pandas
+SQLAlchemy>=2.0

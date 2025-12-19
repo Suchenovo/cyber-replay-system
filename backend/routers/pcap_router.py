@@ -1,10 +1,13 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException
+from fastapi import APIRouter, File, UploadFile, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pathlib import Path
 import uuid
 import os
+from sqlalchemy.orm import Session
 
 from services.pcap_parser import PCAPParser
+from database import get_db
+from models import PcapFile
 
 router = APIRouter()
 
@@ -12,7 +15,7 @@ UPLOAD_DIR = Path("uploads")
 
 
 @router.post("/upload")
-async def upload_pcap(file: UploadFile = File(...)):
+async def upload_pcap(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """上传PCAP文件"""
     if not file.filename.endswith((".pcap", ".pcapng", ".cap")):
         raise HTTPException(status_code=400, detail="只支持PCAP格式文件")
@@ -34,6 +37,17 @@ async def upload_pcap(file: UploadFile = File(...)):
     parser = PCAPParser(str(save_path))
     try:
         basic_info = parser.get_basic_info()
+        # 写入数据库
+        db_obj = PcapFile(
+            file_id=file_id,
+            filename=file.filename,
+            path=str(save_path),
+            size=len(content),
+            total_packets=basic_info.get("total_packets", 0),
+            duration=basic_info.get("duration", 0.0),
+        )
+        db.add(db_obj)
+        db.commit()
         return {
             "file_id": file_id,
             "filename": file.filename,
