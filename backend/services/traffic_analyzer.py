@@ -1,289 +1,155 @@
-from scapy.all import rdpcap, IP, TCP, UDP, ICMP
+from scapy.all import PcapReader, IP, TCP, UDP, ICMP
 from collections import defaultdict, Counter
-from datetime import datetime
-
+import os
 
 class TrafficAnalyzer:
-    """流量分析器"""
+    """
+    终极流量分析器 (All-in-One 一次遍历版)
+    集成：ECharts适配 + Top-N截断 + 内置时间线
+    """
 
     def __init__(self, pcap_file):
         self.pcap_file = pcap_file
-        self.packets = None
 
-    def load_packets(self):
-        """加载数据包"""
-        if self.packets is None:
-            self.packets = rdpcap(self.pcap_file)
-        return self.packets
+    def _get_protocol_name(self, pkt):
+        if TCP in pkt: return "TCP"
+        if UDP in pkt: return "UDP"
+        if ICMP in pkt: return "ICMP"
+        return "Other"
 
     def full_analysis(self):
-        """完整分析"""
-        return {
-            "protocols": self.analyze_protocols(),
-            "flows": self.analyze_flows(),
-            "attack_path": self.analyze_attack_path(),
-            "statistics": self.get_statistics(),
-        }
-
-    def analyze_protocols(self):
-        """协议分析"""
-        packets = self.load_packets()
-
+        # --- 1. 初始化容器 ---
+        total_packets = 0
+        total_bytes = 0
+        start_time = None
+        end_time = None
+        
         protocol_stats = Counter()
-        for pkt in packets:
-            if IP in pkt:
-                if TCP in pkt:
-                    protocol_stats["TCP"] += 1
-                elif UDP in pkt:
-                    protocol_stats["UDP"] += 1
-                elif ICMP in pkt:
-                    protocol_stats["ICMP"] += 1
-                else:
-                    protocol_stats["Other IP"] += 1
-            else:
-                protocol_stats["Non-IP"] += 1
-
-        return {
-            "protocol_distribution": [
-                {"name": proto, "value": count}
-                for proto, count in protocol_stats.items()
-            ]
-        }
-
-    def analyze_flows(self):
-        """流量会话分析"""
-        packets = self.load_packets()
-
-        flows = defaultdict(
-            lambda: {"packets": 0, "bytes": 0, "start_time": None, "end_time": None}
-        )
-
-        for pkt in packets:
-            if IP in pkt:
-                # 定义流的五元组
-                if TCP in pkt:
-                    flow_key = (
-                        pkt[IP].src,
-                        pkt[TCP].sport,
-                        pkt[IP].dst,
-                        pkt[TCP].dport,
-                        "TCP",
-                    )
-                elif UDP in pkt:
-                    flow_key = (
-                        pkt[IP].src,
-                        pkt[UDP].sport,
-                        pkt[IP].dst,
-                        pkt[UDP].dport,
-                        "UDP",
-                    )
-                else:
-                    continue
-
-                flow = flows[flow_key]
-                flow["packets"] += 1
-                flow["bytes"] += len(pkt)
-
-                pkt_time = float(pkt.time)
-                if flow["start_time"] is None:
-                    flow["start_time"] = pkt_time
-                flow["end_time"] = pkt_time
-
-        # 转换为列表并排序
-        flow_list = []
-        for flow_key, stats in flows.items():
-            flow_list.append(
-                {
-                    "src_ip": flow_key[0],
-                    "src_port": flow_key[1],
-                    "dst_ip": flow_key[2],
-                    "dst_port": flow_key[3],
-                    "protocol": flow_key[4],
-                    "packets": stats["packets"],
-                    "bytes": stats["bytes"],
-                    "duration": (
-                        stats["end_time"] - stats["start_time"]
-                        if stats["start_time"]
-                        else 0
-                    ),
-                }
-            )
-
-        # 按数据包数量排序
-        flow_list.sort(key=lambda x: x["packets"], reverse=True)
-
-        return {"total_flows": len(flow_list), "top_flows": flow_list[:20]}
-
-    def analyze_attack_path(self):
-        """攻击路径分析"""
-        packets = self.load_packets()
-
-        # 构建通信关系图
-        connections = defaultdict(lambda: {"count": 0, "protocols": set()})
-        nodes = set()
-
-        for pkt in packets:
-            if IP in pkt:
-                src = pkt[IP].src
-                dst = pkt[IP].dst
-                nodes.add(src)
-                nodes.add(dst)
-
-                key = (src, dst)
-                connections[key]["count"] += 1
-
-                if TCP in pkt:
-                    connections[key]["protocols"].add("TCP")
-                elif UDP in pkt:
-                    connections[key]["protocols"].add("UDP")
-                elif ICMP in pkt:
-                    connections[key]["protocols"].add("ICMP")
-
-        # 识别潜在的攻击特征
-        attack_indicators = []
-        for (src, dst), info in connections.items():
-            # 大量数据包可能表示扫描或DDoS
-            if info["count"] > 100:
-                attack_indicators.append(
-                    {
-                        "type": "high_traffic",
-                        "src": src,
-                        "dst": dst,
-                        "count": info["count"],
-                    }
-                )
-
-        return {
-            "nodes": list(nodes),
-            "connections": [
-                {
-                    "source": src,
-                    "target": dst,
-                    "count": info["count"],
-                    "protocols": list(info["protocols"]),
-                }
-                for (src, dst), info in connections.items()
-            ],
-            "attack_indicators": attack_indicators,
-        }
-
-    def get_attack_path_graph(self):
-        """生成攻击路径图（ECharts格式）"""
-        analysis = self.analyze_attack_path()
-
-        # 转换为ECharts图格式
-        nodes_data = []
-        links_data = []
-        categories = [{"name": "正常主机"}, {"name": "可疑主机"}, {"name": "攻击源"}]
-
-        # 识别攻击源（发送大量数据包的节点）
-        node_stats = defaultdict(lambda: {"sent": 0, "received": 0})
-        for conn in analysis["connections"]:
-            node_stats[conn["source"]]["sent"] += conn["count"]
-            node_stats[conn["target"]]["received"] += conn["count"]
-
-        # 创建节点
-        for node in analysis["nodes"]:
-            stats = node_stats[node]
-            # 判断节点类型
-            if stats["sent"] > 1000:
-                category = 2  # 攻击源
-                symbol_size = 50
-            elif stats["sent"] > 100 or stats["received"] > 100:
-                category = 1  # 可疑
-                symbol_size = 35
-            else:
-                category = 0  # 正常
-                symbol_size = 25
-
-            nodes_data.append(
-                {
-                    "id": node,
-                    "name": node,
-                    "symbolSize": symbol_size,
-                    "category": category,
-                    "label": {"show": True},
-                }
-            )
-
-        # 创建连接
-        for conn in analysis["connections"]:
-            links_data.append(
-                {
-                    "source": conn["source"],
-                    "target": conn["target"],
-                    "value": conn["count"],
-                    "lineStyle": {
-                        "width": min(conn["count"] / 10, 10),
-                        "curveness": 0.2,
-                    },
-                }
-            )
-
-        return {"nodes": nodes_data, "links": links_data, "categories": categories}
-
-    def get_statistics(self):
-        """获取统计信息"""
-        packets = self.load_packets()
-
-        if len(packets) == 0:
-            return {}
-
-        total_bytes = sum(len(pkt) for pkt in packets)
-        start_time = float(packets[0].time)
-        end_time = float(packets[-1].time)
-        duration = end_time - start_time
-
-        # IP统计
         src_ips = Counter()
-        dst_ips = Counter()
+        connection_counts = defaultdict(int)
+        flow_stats = defaultdict(lambda: {"packets": 0, "bytes": 0})
+        
+        # [新增] 时间线容器：按秒聚合
+        timeline_stats = defaultdict(lambda: {"packets": 0, "bytes": 0})
 
-        for pkt in packets:
-            if IP in pkt:
-                src_ips[pkt[IP].src] += 1
-                dst_ips[pkt[IP].dst] += 1
+        # --- 2. 极速流式读取 (只读一遍，全量计算) ---
+        try:
+            with PcapReader(self.pcap_file) as reader:
+                for pkt in reader:
+                    total_packets += 1
+                    pkt_len = len(pkt)
+                    total_bytes += pkt_len
+                    
+                    try:
+                        pkt_time = float(pkt.time)
+                        # [新增] 顺手更新时间线
+                        ts_second = int(pkt_time)
+                        timeline_stats[ts_second]["packets"] += 1
+                        timeline_stats[ts_second]["bytes"] += pkt_len
+                    except:
+                        continue
 
-        return {
-            "total_packets": len(packets),
+                    if start_time is None: start_time = pkt_time
+                    end_time = pkt_time
+
+                    if IP in pkt:
+                        src = pkt[IP].src
+                        dst = pkt[IP].dst
+                        proto = self._get_protocol_name(pkt)
+                        
+                        protocol_stats[proto] += 1
+                        src_ips[src] += 1
+                        connection_counts[(src, dst)] += 1
+
+                        if proto in ["TCP", "UDP"]:
+                            flow_key = (src, dst, proto)
+                            flow_stats[flow_key]["packets"] += 1
+                            flow_stats[flow_key]["bytes"] += pkt_len
+                    else:
+                        protocol_stats["Non-IP"] += 1
+        except Exception as e:
+            print(f"解析警告: {e}")
+
+        # --- 3. 数据组装 ---
+        duration = (end_time - start_time) if (start_time and end_time) else 0
+
+        # A. 统计概览
+        statistics = {
+            "total_packets": total_packets,
             "total_bytes": total_bytes,
             "duration": duration,
-            "avg_packet_size": total_bytes / len(packets),
-            "packets_per_second": len(packets) / duration if duration > 0 else 0,
-            "unique_src_ips": len(src_ips),
-            "unique_dst_ips": len(dst_ips),
-            "top_talkers": [
-                {"ip": ip, "packets": count} for ip, count in src_ips.most_common(10)
-            ],
+            "packets_per_second": total_packets / duration if duration > 0 else 0,
+            "top_talkers": [{"ip": ip, "packets": c} for ip, c in src_ips.most_common(10)]
         }
 
-    def get_timeline_data(self):
-        """获取时间线数据"""
-        packets = self.load_packets()
+        # B. 协议分布
+        protocols = {"protocol_distribution": [{"name": k, "value": v} for k, v in protocol_stats.items()]}
 
-        if len(packets) == 0:
-            return {"timeline": []}
+        # C. 流量会话 (Top 50)
+        sorted_flows = sorted(flow_stats.items(), key=lambda x: x[1]['packets'], reverse=True)[:50]
+        top_flows = []
+        for (src, dst, proto), info in sorted_flows:
+            top_flows.append({
+                "src_ip": src, "src_port": "*", "dst_ip": dst, "dst_port": "*", "protocol": proto,
+                "packets": info["packets"], "bytes": info["bytes"]
+            })
+        flows_data = {"top_flows": top_flows}
 
-        # 按时间窗口聚合
-        time_windows = defaultdict(lambda: {"packets": 0, "bytes": 0})
+        # D. 攻击路径图 (Top 100)
+        limit_links = 100 
+        sorted_links = sorted(connection_counts.items(), key=lambda x: x[1], reverse=True)[:limit_links]
+        valid_nodes = set()
+        echarts_links = []
+        
+        for (src, dst), count in sorted_links:
+            valid_nodes.add(src)
+            valid_nodes.add(dst)
+            echarts_links.append({
+                "source": src, "target": dst, "value": count,
+                "lineStyle": {"width": min(count / 5, 5), "curveness": 0.2}
+            })
 
-        start_time = float(packets[0].time)
-        window_size = 1.0  # 1秒窗口
+        categories = [{"name": "正常主机"}, {"name": "活跃主机"}, {"name": "高频节点"}]
+        echarts_nodes = []
+        for node in valid_nodes:
+            sent_count = src_ips[node]
+            if sent_count > 1000: cat = 2
+            elif sent_count > 100: cat = 1
+            else: cat = 0
+            
+            echarts_nodes.append({
+                "id": node, "name": node, "symbolSize": 20 + (cat * 10),
+                "category": cat, "label": {"show": True}
+            })
 
-        for pkt in packets:
-            pkt_time = float(pkt.time)
-            window = int((pkt_time - start_time) / window_size)
-            time_windows[window]["packets"] += 1
-            time_windows[window]["bytes"] += len(pkt)
+        attack_path_data = {
+            "nodes": echarts_nodes,
+            "links": echarts_links,
+            "categories": categories
+        }
 
-        # 转换为时间线数据
-        timeline = []
-        for window in sorted(time_windows.keys()):
-            timeline.append(
-                {
-                    "time": start_time + window * window_size,
-                    "packets": time_windows[window]["packets"],
-                    "bytes": time_windows[window]["bytes"],
-                }
-            )
+        # E. [新增] 格式化时间线数据
+        timeline_list = []
+        for ts in sorted(timeline_stats.keys()):
+            timeline_list.append({
+                "time": ts,
+                "packets": timeline_stats[ts]["packets"],
+                "bytes": timeline_stats[ts]["bytes"]
+            })
 
-        return {"timeline": timeline}
+        # 返回大礼包
+        return {
+            "statistics": statistics,
+            "protocols": protocols,
+            "flows": flows_data,
+            "attack_path": attack_path_data,
+            "timeline": {"timeline": timeline_list} # 直接返回时间线
+        }
+
+    # 兼容接口（保留，以防万一）
+    def get_timeline_data(self): return self.full_analysis()["timeline"]
+    def get_statistics(self): return self.full_analysis()["statistics"]
+    def analyze_protocols(self): return self.full_analysis()["protocols"]
+    def analyze_flows(self): return self.full_analysis()["flows"]
+    def get_attack_path_graph(self): return self.full_analysis()["attack_path"]
+    def analyze_attack_path(self): return self.full_analysis()["attack_path"]
