@@ -1,6 +1,15 @@
 version: '3.8'
 
 services:
+  # redis 服务（用于缓存和消息队列）
+  redis:
+    image: redis:latest
+    container_name: cyber-replay-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - cyber-replay-net
+    restart: unless-stopped
   # 后端服务
   backend:
     build:
@@ -15,6 +24,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - PYTHONUNBUFFERED=1
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
     networks:
       - cyber-replay-net
       - sandbox-net
