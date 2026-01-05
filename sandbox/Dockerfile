@@ -1,10 +1,10 @@
 FROM ubuntu:22.04
 
-# [新增] 设置环境变量，禁止安装过程中的交互式弹窗
+# 保持之前的非交互设置
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 安装必要工具
-# [新增] echo 语句是为了预先回答 wireshark 的特定问题（虽然 noninteractive 通常够用了，加这个更保险）
+# [新增] 在下面的列表中添加了 tcpreplay
 RUN echo "wireshark-common wireshark-common/install-setuid boolean true" | debconf-set-selections && \
     apt-get update && apt-get install -y \
     tcpdump \
@@ -15,6 +15,7 @@ RUN echo "wireshark-common wireshark-common/install-setuid boolean true" | debco
     net-tools \
     python3 \
     python3-pip \
+    tcpreplay \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装Python包

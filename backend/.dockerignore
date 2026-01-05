@@ -1,0 +1,31 @@
+# --- Python 缓存与环境 (最重要) ---
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv
+.venv
+env
+pip-log.txt
+
+# --- 数据与上传文件 (防止测试数据污染镜像) ---
+uploads/
+pcap_files/
+data/
+*.db
+*.sqlite3
+
+# --- 环境变量 (安全) ---
+.env
+.env.*
+
+# --- IDE 与 Git ---
+.git
+.gitignore
+.vscode
+.idea
+*.md
+
+# --- Docker 相关 ---
+Dockerfile

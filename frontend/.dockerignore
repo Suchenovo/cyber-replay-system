@@ -1,0 +1,21 @@
+# --- 依赖与构建产物 (最重要) ---
+node_modules
+dist
+.output
+coverage
+
+# --- 环境变量与密钥 (安全) ---
+.env
+.env.*
+!.env.example
+
+# --- IDE 与 Git ---
+.git
+.gitignore
+.vscode
+.idea
+*.md
+
+# --- Docker 相关 ---
+Dockerfile
+docker-compose.yaml
