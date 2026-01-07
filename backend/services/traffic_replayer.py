@@ -8,43 +8,49 @@ import io
 import uuid
 import logging
 import redis
-from scapy.all import PcapReader
 from typing import Optional
 
+# 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Redis 配置
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = 6379
 
 class TrafficReplayer:
-    """流量重放器 (TCPreplay 高性能版)"""
+    """流量重放器 (TCPreplay 高性能优化版)"""
 
     def __init__(self, pcap_file=None):
         self.pcap_file = pcap_file
         try:
+            # 初始化 Docker 客户端
             self.docker_client = docker.from_env()
         except Exception as e:
             logger.warning(f"Docker client init failed: {e}")
             self.docker_client = None
         
         try:
+            # 初始化 Redis 连接
             self.redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
         except Exception as e:
             logger.error(f"Redis connection failed: {e}")
             self.redis = None
 
     def _save_task(self, task_id, data):
+        """保存任务状态到 Redis"""
         if self.redis:
             self.redis.set(f"replay_task:{task_id}", json.dumps(data))
     
     def _get_task(self, task_id):
+        """从 Redis 获取任务状态"""
         if self.redis:
             data = self.redis.get(f"replay_task:{task_id}")
             return json.loads(data) if data else None
         return None
 
     def _copy_to_container(self, container, src_path, dst_path):
+        """将文件复制到 Docker 容器内"""
         try:
             with open(src_path, 'rb') as f:
                 file_data = f.read()
@@ -61,7 +67,8 @@ class TrafficReplayer:
 
     def _generate_replay_script(self, pcap_path, status_path, stop_path, target_ip, speed):
         """
-        生成调用系统级工具 tcpreplay 的脚本
+        生成在容器内部运行的 Python 脚本。
+        包含：pcapng自动转换、动态网卡检测、IO死锁防护。
         """
         return f"""
 import sys
@@ -69,7 +76,6 @@ import time
 import json
 import os
 import subprocess
-from scapy.all import PcapReader
 
 pcap_path = "{pcap_path}"
 status_path = "{status_path}"
@@ -89,55 +95,70 @@ def update_status(sent, total, status="running", error=None):
     with open(tmp_path, "w") as f: json.dump(data, f)
     os.rename(tmp_path, status_path)
 
-try:
-    # 1. 简单统计总包数 (用于前端显示总量)
-    total_packets = 0
-    # 为了极速，这里也可以跳过，直接设为 100 或根据文件大小估算
-    # 但为了体验好，还是读一下头
+def get_interface():
+    # 自动查找容器内可用网卡
     try:
-        for _ in PcapReader(pcap_path): total_packets += 1
-    except: pass
-    
+        interfaces = os.listdir('/sys/class/net/')
+        for iface in interfaces:
+            if iface != 'lo': return iface
+        return 'eth0'
+    except: return 'eth0'
+
+try:
+    final_pcap = pcap_path
+
+    # ==========================================
+    # 1. 【新增】自动检测并转换 pcapng -> pcap
+    # ==========================================
+    # tcpreplay 不支持 pcapng，既然容器里装了 tshark，我们就用它转一下
+    if pcap_path.endswith('.pcapng') or 'pcapng' in pcap_path:
+        print("Converting pcapng to pcap...")
+        converted_pcap = pcap_path + ".converted.pcap"
+        # 使用 tshark 进行转换 (-F pcap 指定输出格式)
+        convert_cmd = [
+            "tshark", "-F", "pcap", "-r", pcap_path, "-w", converted_pcap
+        ]
+        # 使用 DEVNULL 防止输出阻塞
+        subprocess.run(convert_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        final_pcap = converted_pcap
+
+    # 2. 估算包数量
+    try:
+        file_size = os.path.getsize(final_pcap)
+        total_packets = int(file_size / 800) # 粗略估算
+        if total_packets == 0: total_packets = 100
+    except:
+        total_packets = 1000
+
     update_status(0, total_packets, "running")
 
-    # 2. 准备命令
-    final_pcap = pcap_path
-    
-    # 如果需要修改 IP，使用 tcprewrite (比 Python 快得多)
+    # 3. IP 重写 (tcprewrite)
     if target_ip != "None":
-        rewritten_pcap = pcap_path + ".rewrite.pcap"
-        # --dstipmap=0.0.0.0/0:TARGET_IP 将所有目标IP重写为 target_ip
-        # -C 修复校验和
+        rewritten_pcap = final_pcap + ".rewrite.pcap"
         rewrite_cmd = [
             "tcprewrite",
             "--dstipmap=0.0.0.0/0:" + target_ip,
-            "--infile=" + pcap_path,
+            "--infile=" + final_pcap,
             "--outfile=" + rewritten_pcap,
             "--checksum" 
         ]
-        print(f"Executing: {{' '.join(rewrite_cmd)}}")
-        subprocess.run(rewrite_cmd, check=True)
+        subprocess.run(rewrite_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         final_pcap = rewritten_pcap
 
-    # 3. 使用 tcpreplay 发送
-    # -i eth0: 指定网卡
-    # -x speed: 倍速播放
-    # --quiet: 减少输出
+    # 4. 执行重放
+    interface = get_interface()
+    
     replay_cmd = [
         "tcpreplay",
-        "-i", "eth0",
+        "-i", interface,
         "-x", str(speed),
+        "--quiet",
         final_pcap
     ]
     
-    print(f"Executing: {{' '.join(replay_cmd)}}")
+    # 解决死锁的关键：stdout=subprocess.DEVNULL
+    process = subprocess.Popen(replay_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     
-    # 使用 Popen 运行，这样我们可以非阻塞地等待它完成
-    # 注意：tcpreplay 运行极快，可能瞬间就结束了，很难抓取实时进度
-    # 所以我们直接在开始时设为 running，结束时设为 completed
-    process = subprocess.Popen(replay_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    
-    # 简单的监控循环
     while process.poll() is None:
         if os.path.exists(stop_path):
             process.terminate()
@@ -145,10 +166,11 @@ try:
             sys.exit(0)
         time.sleep(0.5)
     
-    stdout, stderr = process.communicate()
+    _, stderr = process.communicate()
     
     if process.returncode != 0:
-        raise Exception(f"tcpreplay failed: {{stderr.decode()}}")
+        err_msg = stderr.decode() if stderr else "Unknown error"
+        raise Exception(f"tcpreplay failed: {{err_msg}}")
 
     update_status(total_packets, total_packets, "completed")
 
@@ -158,6 +180,7 @@ except Exception as e:
 """
 
     def start_replay(self, target_ip: Optional[str] = None, speed_multiplier: float = 1.0, use_sandbox: bool = True):
+        """启动重放任务"""
         task_id = str(uuid.uuid4())
         initial_state = {
             "task_id": task_id,
@@ -170,6 +193,7 @@ except Exception as e:
         }
         self._save_task(task_id, initial_state)
 
+        # 异步线程执行，不阻塞 API
         thread = threading.Thread(
             target=self._task_manager_thread,
             args=(task_id, target_ip, speed_multiplier, use_sandbox),
@@ -179,14 +203,15 @@ except Exception as e:
         return task_id
 
     def _task_manager_thread(self, task_id, target_ip, speed_multiplier, use_sandbox):
+        """任务管理线程"""
         try:
             if use_sandbox:
                 self._run_sandbox_replay(task_id, target_ip, speed_multiplier)
             else:
-                # 本地模式我们暂时不支持 tcpreplay (因为它依赖宿主机环境)，
-                # 如果你在 Docker 里跑 backend，这里其实也可以改，
-                # 但为了简单，本地模式先留空或报错，或者保留旧的 Scapy 逻辑
-                pass 
+                # 暂不支持本地模式，直接标记失败
+                task = self._get_task(task_id)
+                task.update({"status": "failed", "error": "Local mode not supported without docker"})
+                self._save_task(task_id, task)
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
             task = self._get_task(task_id) or {}
@@ -194,74 +219,91 @@ except Exception as e:
             self._save_task(task_id, task)
 
     def _run_sandbox_replay(self, task_id, target_ip, speed):
+        """在 Docker 沙箱中执行重放"""
         if not self.docker_client: raise Exception("Docker client not available")
-        container = self.docker_client.containers.get('cyber-replay-sandbox')
         
+        # 获取沙箱容器
+        try:
+            container = self.docker_client.containers.get('cyber-replay-sandbox')
+        except docker.errors.NotFound:
+            raise Exception("Sandbox container (cyber-replay-sandbox) is not running")
+
+        # 定义容器内路径
         sandbox_pcap = f"/tmp/{task_id}.pcap"
         sandbox_script = f"/tmp/replay_{task_id}.py"
         status_file = f"/tmp/{task_id}.status"
         stop_file = f"/tmp/{task_id}.stop"
 
+        # 1. 上传 PCAP 文件
+        if not self.pcap_file or not os.path.exists(self.pcap_file):
+            raise Exception("PCAP file not found")
         self._copy_to_container(container, self.pcap_file, sandbox_pcap)
         
-        # 生成脚本
+        # 2. 生成并上传 Python 执行脚本
         script_content = self._generate_replay_script(
             sandbox_pcap, status_file, stop_file, target_ip or "None", speed
         )
         
         local_script_path = f"/tmp/replay_{task_id}.py"
-        with open(local_script_path, "w") as f: f.write(script_content)
+        # 确保本地 tmp 目录存在
+        os.makedirs(os.path.dirname(local_script_path), exist_ok=True)
+        
+        with open(local_script_path, "w", encoding='utf-8') as f: 
+            f.write(script_content)
+        
         self._copy_to_container(container, local_script_path, sandbox_script)
         os.remove(local_script_path)
 
-        # 启动
+        # 3. 在容器内异步执行脚本
         container.exec_run(f"python3 {sandbox_script}", detach=True)
         
-        # 监控循环
+        # 4. 轮询监控状态文件
         task = self._get_task(task_id)
         task["status"] = "running"
         self._save_task(task_id, task)
         
         while True:
-            # 处理停止信号
+            # 检查是否需要停止
             current_task = self._get_task(task_id)
             if current_task.get("stop_requested"):
                 container.exec_run(f"touch {stop_file}")
             
-            # 读取状态
+            # 读取容器内的状态文件
             try:
                 exit_code, output = container.exec_run(f"cat {status_file}")
                 if exit_code == 0 and output:
                     status_data = json.loads(output.decode('utf-8'))
                     
-                    # 更新进度
+                    # 更新 Redis 状态
                     current_task.update({
-                        "sent_packets": status_data["sent_packets"],
-                        "total_packets": status_data["total_packets"]
+                        "sent_packets": status_data.get("sent_packets", 0),
+                        "total_packets": status_data.get("total_packets", 100)
                     })
                     
-                    if status_data["total_packets"] > 0:
-                        # 简单的进度计算：如果完成了就是 100，否则就是 0 或 50 (tcpreplay 很难拿实时百分比)
-                        if status_data["status"] == "completed":
-                            current_task["progress"] = 100
-                        elif status_data["status"] == "running":
-                            current_task["progress"] = 50 # 假进度，表示正在跑
+                    # 计算进度条
+                    status_str = status_data.get("status")
+                    if status_str == "completed":
+                        current_task["progress"] = 100
+                    elif status_str == "running":
+                        # 因为无法实时获取精确进度，如果是运行中，我们就显示 50% 或做一个假动画
+                        # 或者你可以根据 time.time() - start_time 做一个估算
+                        current_task["progress"] = 50 
                     
-                    script_status = status_data.get("status")
-                    if script_status in ["completed", "stopped", "failed"]:
-                        current_task["status"] = script_status
-                        if script_status == "failed":
+                    if status_str in ["completed", "stopped", "failed"]:
+                        current_task["status"] = status_str
+                        if status_str == "failed":
                             current_task["error"] = status_data.get("error")
                         self._save_task(task_id, current_task)
-                        break
+                        break # 结束循环
                     
                     self._save_task(task_id, current_task)
             except Exception:
+                # 忽略读取过程中的瞬时错误（如文件正被写入）
                 pass
 
-            time.sleep(0.5) # 提高轮询频率
+            time.sleep(0.5) # 轮询间隔
         
-        # 清理
+        # 5. 清理容器内临时文件
         container.exec_run(f"rm {sandbox_pcap} {sandbox_script} {status_file} {stop_file}")
 
     def get_status(self, task_id: str):

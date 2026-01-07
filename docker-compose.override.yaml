@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # 前端服务改造：从 Nginx 生产模式 -> Node 开发模式
+  # ==========================================
+  frontend:
+    # 1. 强制使用 Node 环境，而不是去构建 Nginx 镜像
+    image: node:18-alpine
+    # 2. 覆盖原有的 build 指令，防止它傻傻地去编译 production 包
+
+    working_dir: /app
+    
+    # 3. 【核心魔法】挂载源代码
+    volumes:
+      - ./frontend:/app
+      # ⚠️ 这里的匿名卷非常关键！
+      # 它告诉Docker：“虽然挂载了/app，但请保留容器内/app/node_modules的原样”
+      # 防止你本地没有node_modules导致容器里报错
+      - /app/node_modules
+      
+    # 4. 启动开发服务器 (Vite)
+    # 这里的 --host 0.0.0.0 必须加，否则宿主机访问不到
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    
+    # 5. 端口映射变化
+    # Vite 默认端口是 5173，我们将它映射到宿主机的 3000
+    ports:
+      - "3000:3000"
+    
+    # 6. 环境变量：告诉前端后端在哪里
+    environment:
+      - VITE_API_BASE_URL=http://backend:8000
+
+  # ==========================================
+  # 后端服务改造：开启热重载 (Hot Reload)
+  # ==========================================
+  backend:
+    # 1. 挂载源代码
+    volumes:
+      - ./backend:/app
+      - ./backend/uploads:/app/uploads
+      - ./backend/results:/app/results
+      # 如果你的代码里需要操作 docker，保留这个挂载
+      - /var/run/docker.sock:/var/run/docker.sock
+      
+    # 2. 【核心魔法】覆盖启动命令
+    # --reload 参数会让 uvicorn 监听文件变化，自动重启
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
