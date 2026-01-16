@@ -1,76 +1,53 @@
 <template>
   <div class="replay-page">
-    <!-- 启动重放 -->
     <el-card>
-      <template #header>
-        <h2>流量重放</h2>
-      </template>
-      
+      <h2>流量重放</h2>
       <el-form :model="replayForm" label-width="120px">
         <el-form-item label="选择PCAP文件">
           <el-select v-model="replayForm.fileId" placeholder="请选择文件">
             <el-option
               v-for="file in pcapFiles"
               :key="file.file_id"
-              :label="file.filename"
+              :label="file.file_name || file.file_id"
               :value="file.file_id"
             />
           </el-select>
         </el-form-item>
-        
+
         <el-form-item label="目标IP">
-          <el-input
-            v-model="replayForm.targetIp"
-            placeholder="留空使用原始目标IP"
-            clearable
-          />
+          <el-input v-model="replayForm.targetIp" placeholder="留空使用原始目标IP" />
         </el-form-item>
-        
+
         <el-form-item label="重放速度">
-          <el-slider
-            v-model="replayForm.speedMultiplier"
-            :min="0.1"
-            :max="10"
-            :step="0.1"
-            show-input
-          />
+          <el-slider v-model="replayForm.speedMultiplier" :min="0.1" :max="10" :step="0.1" />
           <span style="margin-left: 10px; color: #909399;">
             {{ replayForm.speedMultiplier }}x 倍速
           </span>
         </el-form-item>
-        
+
         <el-form-item label="使用沙箱">
           <el-switch v-model="replayForm.useSandbox" />
-          <span style="margin-left: 10px; color: #909399;">
-            在隔离环境中安全重放
-          </span>
         </el-form-item>
-        
-        <el-form-item>
-          <el-button type="primary" @click="startReplay" :loading="starting">
-            启动重放
-          </el-button>
-        </el-form-item>
+
+        <el-button type="primary" @click="startReplay" :loading="starting">
+          启动重放
+        </el-button>
       </el-form>
     </el-card>
-    
-    <!-- 任务列表 -->
+
     <el-card class="tasks-card">
       <template #header>
         <div class="card-header">
-          <h3>重放任务列表</h3>
-          <el-button @click="refreshTasks" :icon="Refresh">刷新</el-button>
+          <h3>重放任务</h3>
+          <el-button type="primary" :icon="Refresh" @click="refreshTasks">刷新</el-button>
         </div>
       </template>
-      
+
       <el-table :data="tasks" stripe>
         <el-table-column prop="task_id" label="任务ID" width="280" />
         <el-table-column label="状态" width="120">
           <template #default="{ row }">
-            <el-tag
-              :type="getStatusType(row.status)"
-              effect="dark"
-            >
+            <el-tag :type="getStatusType(row.status)">
               {{ getStatusText(row.status) }}
             </el-tag>
           </template>
@@ -93,29 +70,25 @@
             {{ formatTime(row.start_time) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180">
+        <el-table-column label="操作" width="260">
           <template #default="{ row }">
-            <el-button
-              size="small"
-              type="info"
-              @click="viewTaskDetail(row)"
-            >
-              详情
-            </el-button>
+            <el-button size="small" type="info" @click="viewTaskDetail(row)">详情</el-button>
             <el-button
               size="small"
               type="danger"
               @click="stopTask(row.task_id)"
-              :disabled="row.status !== 'running'"
+              :disabled="!canStop(row.status)"
             >
               停止
+            </el-button>
+            <el-button size="small" type="warning" @click="deleteTask(row.task_id)">
+              删除
             </el-button>
           </template>
         </el-table-column>
       </el-table>
     </el-card>
-    
-    <!-- 任务详情对话框 -->
+
     <el-dialog v-model="detailDialogVisible" title="任务详情" width="60%">
       <el-descriptions :column="2" border v-if="currentTask">
         <el-descriptions-item label="任务ID">
@@ -154,7 +127,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import api from '../api'
 
@@ -176,7 +149,15 @@ let refreshTimer = null
 const loadFileList = async () => {
   try {
     const result = await api.listPcaps()
-    pcapFiles.value = result.files || []
+    const files = result.files || result || []
+    pcapFiles.value = files.map((f) => {
+      if (typeof f === 'string') {
+        return { file_id: f, file_name: f }
+      }
+      const file_id = f.file_id || f.id || f.fileId
+      const file_name = f.file_name || f.filename || f.original_name || f.name || file_id
+      return { ...f, file_id, file_name }
+    })
   } catch (error) {
     ElMessage.error('加载文件列表失败')
   }
@@ -191,26 +172,21 @@ const loadTasks = async () => {
   }
 }
 
-const refreshTasks = () => {
-  loadTasks()
-}
+const refreshTasks = () => loadTasks()
 
 const startReplay = async () => {
   if (!replayForm.value.fileId) {
     ElMessage.warning('请选择PCAP文件')
     return
   }
-  
   starting.value = true
-  
   try {
-    const result = await api.startReplay(
+    await api.startReplay(
       replayForm.value.fileId,
       replayForm.value.targetIp || null,
       replayForm.value.speedMultiplier,
       replayForm.value.useSandbox
     )
-    
     ElMessage.success('重放任务已启动')
     await loadTasks()
   } catch (error) {
@@ -230,27 +206,44 @@ const stopTask = async (taskId) => {
   }
 }
 
+const deleteTask = async (taskId) => {
+  try {
+    await ElMessageBox.confirm('确定要删除该任务吗？', '警告', { type: 'warning' })
+    await api.deleteReplayTask(taskId)
+    ElMessage.success('任务已删除')
+    await loadTasks()
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error('删除失败')
+  }
+}
+
 const viewTaskDetail = (task) => {
   currentTask.value = task
   detailDialogVisible.value = true
 }
 
+const canStop = (status) => {
+  return ['initializing', 'starting', 'preparing', 'running', 'stopping'].includes(status)
+}
+
 const getStatusType = (status) => {
   const types = {
-    'running': 'primary',
-    'completed': 'success',
-    'failed': 'danger',
-    'stopped': 'warning'
+    running: 'primary',
+    completed: 'success',
+    failed: 'danger',
+    stopped: 'warning',
+    stopping: 'warning'
   }
   return types[status] || 'info'
 }
 
 const getStatusText = (status) => {
   const texts = {
-    'running': '运行中',
-    'completed': '已完成',
-    'failed': '失败',
-    'stopped': '已停止'
+    running: '运行中',
+    completed: '已完成',
+    failed: '失败',
+    stopped: '已停止',
+    stopping: '停止中'
   }
   return texts[status] || status
 }
@@ -263,17 +256,13 @@ const formatTime = (timestamp) => {
 onMounted(() => {
   loadFileList()
   loadTasks()
-  
-  // 自动刷新任务状态
   refreshTimer = setInterval(() => {
     loadTasks()
   }, 3000)
 })
 
 onUnmounted(() => {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-  }
+  if (refreshTimer) clearInterval(refreshTimer)
 })
 </script>
 
@@ -289,8 +278,8 @@ onUnmounted(() => {
 
 .card-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
 }
 
 .card-header h3 {

@@ -80,3 +80,13 @@ async def list_replay_tasks():
     replayer = TrafficReplayer()
     tasks = replayer.list_tasks()
     return {"tasks": tasks}
+
+
+@router.delete("/{task_id}")
+async def delete_replay_task(task_id: str):
+    """删除重放任务"""
+    replayer = TrafficReplayer()
+    result = replayer.delete_task(task_id)
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result

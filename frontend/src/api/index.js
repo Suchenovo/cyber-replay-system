@@ -96,5 +96,9 @@ export default {
   
   listReplayTasks() {
     return api.get('/replay/tasks')
+  },
+  
+  deleteReplayTask(taskId) {
+    return api.delete(`/replay/${taskId}`)
   }
 }
