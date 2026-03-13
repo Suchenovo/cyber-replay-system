@@ -1,82 +1,134 @@
-from scapy.all import PcapReader, IP, TCP, UDP, ICMP, ARP
-from collections import Counter
 import os
+import socket
+from collections import Counter
+from typing import Dict, Any, List
+import dpkt
+
 
 class PCAPParser:
-    """PCAP文件解析器 (OOM优化版：流式读取)"""
+    """PCAP文件解析器 (全量 dpkt 极速版)"""
 
-    def __init__(self, pcap_file):
+    def __init__(self, pcap_file: str):
         self.pcap_file = pcap_file
-        # 移除 self.packets，禁止全量缓存
 
-    def get_basic_info(self):
-        """获取基本信息 (流式统计)"""
+    @staticmethod
+    def _inet_to_str(inet: bytes) -> str:
+        """将字节格式的 IP 转换为字符串"""
+        try:
+            return socket.inet_ntop(socket.AF_INET, inet)
+        except ValueError:
+            try:
+                return socket.inet_ntop(socket.AF_INET6, inet)
+            except ValueError:
+                return "Unknown"
+
+    def _get_reader(self, f: Any) -> Any:
+        """智能适配 PCAP 和 PCAPNG 格式"""
+        try:
+            return dpkt.pcap.Reader(f)
+        except ValueError:
+            f.seek(0)
+            return dpkt.pcapng.Reader(f)
+
+    def _get_tcp_flags(self, flags: int) -> str:
+        """解析 TCP 标志位，还原为类似 Scapy 的字符串表示"""
+        ret = []
+        if flags & dpkt.tcp.TH_FIN:
+            ret.append("F")
+        if flags & dpkt.tcp.TH_SYN:
+            ret.append("S")
+        if flags & dpkt.tcp.TH_RST:
+            ret.append("R")
+        if flags & dpkt.tcp.TH_PUSH:
+            ret.append("P")
+        if flags & dpkt.tcp.TH_ACK:
+            ret.append("A")
+        if flags & dpkt.tcp.TH_URG:
+            ret.append("U")
+        if flags & dpkt.tcp.TH_ECE:
+            ret.append("E")
+        if flags & dpkt.tcp.TH_CWR:
+            ret.append("C")
+        return "".join(ret) if ret else "none"
+
+    def get_basic_info(self) -> Dict[str, Any]:
+        """获取基本信息 (流式统计，极速版)"""
         count = 0
         try:
-            # 仅遍历计数，不占用内存
-            # 注意：对于GB级大文件，此步骤可能耗时较长，但在Python层面这是最安全的做法
-            for _ in PcapReader(self.pcap_file):
-                count += 1
-        except Exception:
-            pass
-            
+            if os.path.exists(self.pcap_file):
+                with open(self.pcap_file, "rb") as f:
+                    reader = self._get_reader(f)
+                    # 仅遍历计数，避免任何反序列化开销
+                    for _ in reader:
+                        count += 1
+        except Exception as e:
+            print(f"Warning: Error getting basic info: {e}")
+
         return {
             "total_packets": count,
-            "file_size": os.path.getsize(self.pcap_file),
-            "format": "PCAP",
+            "file_size": (
+                os.path.getsize(self.pcap_file) if os.path.exists(self.pcap_file) else 0
+            ),
+            "format": "PCAP/PCAPNG",
         }
 
-    def get_detailed_info(self):
-        """获取详细信息 (流式处理，防止OOM)"""
+    def get_detailed_info(self) -> Dict[str, Any]:
+        """获取详细信息 (完整统计面板数据)"""
         protocols = Counter()
         src_ips = Counter()
         dst_ips = Counter()
         src_ports = Counter()
         dst_ports = Counter()
-        
+
         start_time = None
         end_time = None
         packet_count = 0
 
         try:
-            # 使用上下文管理器打开流式读取
-            with PcapReader(self.pcap_file) as reader:
-                for pkt in reader:
+            with open(self.pcap_file, "rb") as f:
+                reader = self._get_reader(f)
+                for timestamp, buf in reader:
                     packet_count += 1
-                    
+
                     # 1. 时间戳统计
+                    if start_time is None:
+                        start_time = timestamp
+                    end_time = timestamp
+
                     try:
-                        ts = float(pkt.time)
-                        if start_time is None:
-                            start_time = ts
-                        end_time = ts
-                    except (AttributeError, ValueError):
-                        pass
+                        eth = dpkt.ethernet.Ethernet(buf)
+                    except Exception:
+                        continue  # 忽略损坏的包
 
                     # 2. 协议与IP统计
-                    if IP in pkt:
-                        protocols["IP"] += 1
-                        src_ips[pkt[IP].src] += 1
-                        dst_ips[pkt[IP].dst] += 1
-
-                        if TCP in pkt:
-                            protocols["TCP"] += 1
-                            src_ports[pkt[TCP].sport] += 1
-                            dst_ports[pkt[TCP].dport] += 1
-                        elif UDP in pkt:
-                            protocols["UDP"] += 1
-                            src_ports[pkt[UDP].sport] += 1
-                            dst_ports[pkt[UDP].dport] += 1
-                        elif ICMP in pkt:
-                            protocols["ICMP"] += 1
-
-                    if ARP in pkt:
+                    if isinstance(eth.data, dpkt.arp.ARP):
                         protocols["ARP"] += 1
-                        
-        except Exception as e:
-            print(f"Warning: Error parsing pcap stream: {e}")
+                        continue
 
-        # 计算持续时间
+                    if not isinstance(eth.data, (dpkt.ip.IP, dpkt.ip6.IP6)):
+                        continue
+
+                    ip = eth.data
+                    protocols["IP"] += 1
+                    src_ip = self._inet_to_str(ip.src)
+                    dst_ip = self._inet_to_str(ip.dst)
+                    src_ips[src_ip] += 1
+                    dst_ips[dst_ip] += 1
+
+                    if isinstance(ip.data, dpkt.tcp.TCP):
+                        protocols["TCP"] += 1
+                        src_ports[ip.data.sport] += 1
+                        dst_ports[ip.data.dport] += 1
+                    elif isinstance(ip.data, dpkt.udp.UDP):
+                        protocols["UDP"] += 1
+                        src_ports[ip.data.sport] += 1
+                        dst_ports[ip.data.dport] += 1
+                    elif isinstance(ip.data, dpkt.icmp.ICMP):
+                        protocols["ICMP"] += 1
+
+        except Exception as e:
+            print(f"Warning: Error parsing detailed info: {e}")
+
         duration = (end_time - start_time) if (start_time and end_time) else 0
 
         return {
@@ -101,43 +153,48 @@ class PCAPParser:
             ],
         }
 
-    def get_packets_summary(self, limit=100):
-        """获取数据包摘要 (流式读取前 N 个)"""
+    def get_packets_summary(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """获取数据包摘要 (用于前端列表预览)"""
         summary = []
-        
+
         try:
-            with PcapReader(self.pcap_file) as reader:
-                for i, pkt in enumerate(reader):
+            with open(self.pcap_file, "rb") as f:
+                reader = self._get_reader(f)
+                for i, (timestamp, buf) in enumerate(reader):
                     if i >= limit:
                         break
-                        
-                    packet_info = {
-                        "index": i, 
-                        "time": float(pkt.time) if hasattr(pkt, 'time') else 0.0, 
-                        "length": len(pkt)
-                    }
 
-                    if IP in pkt:
-                        packet_info.update(
-                            {
-                                "src_ip": pkt[IP].src,
-                                "dst_ip": pkt[IP].dst,
-                                "protocol": pkt[IP].proto,
-                            }
-                        )
+                    packet_info = {"index": i, "time": timestamp, "length": len(buf)}
 
-                        if TCP in pkt:
+                    try:
+                        eth = dpkt.ethernet.Ethernet(buf)
+                        if isinstance(eth.data, (dpkt.ip.IP, dpkt.ip6.IP6)):
+                            ip = eth.data
                             packet_info.update(
                                 {
-                                    "src_port": pkt[TCP].sport,
-                                    "dst_port": pkt[TCP].dport,
-                                    "flags": str(pkt[TCP].flags),
+                                    "src_ip": self._inet_to_str(ip.src),
+                                    "dst_ip": self._inet_to_str(ip.dst),
+                                    "protocol": ip.p,  # IP 协议号
                                 }
                             )
-                        elif UDP in pkt:
-                            packet_info.update(
-                                {"src_port": pkt[UDP].sport, "dst_port": pkt[UDP].dport}
-                            )
+
+                            if isinstance(ip.data, dpkt.tcp.TCP):
+                                packet_info.update(
+                                    {
+                                        "src_port": ip.data.sport,
+                                        "dst_port": ip.data.dport,
+                                        "flags": self._get_tcp_flags(ip.data.flags),
+                                    }
+                                )
+                            elif isinstance(ip.data, dpkt.udp.UDP):
+                                packet_info.update(
+                                    {
+                                        "src_port": ip.data.sport,
+                                        "dst_port": ip.data.dport,
+                                    }
+                                )
+                    except Exception:
+                        pass  # 忽略解析失败的层级，保留基础信息
 
                     summary.append(packet_info)
         except Exception as e:

@@ -16,7 +16,7 @@ api.interceptors.request.use(
   }
 )
 
-// 响应拦截器
+// 响应拦截器：已经在这里统一剥离了 response.data，后面的接口直接 return 即可
 api.interceptors.response.use(
   response => {
     return response.data
@@ -28,7 +28,7 @@ api.interceptors.response.use(
 )
 
 export default {
-  // --- PCAP管理 (保持不变) ---
+  // --- PCAP管理 ---
   uploadPcap(file) {
     const formData = new FormData()
     formData.append('file', file)
@@ -50,24 +50,30 @@ export default {
     return api.delete(`/pcap/${fileId}`)
   },
   
-  // --- 流量分析 (核心修改) ---
+  // --- 流量分析 (合并清理版) ---
   
-  // 1. 提交分析任务 (现在返回的是 task_id)
-  analyzeTraffic(fileId, analysisType = 'full') {
-    return api.post('/analysis/analyze', { file_id: fileId, analysis_type: analysisType })
+  /**
+   * 1. 提交流量分析任务，返回 task_id
+   */
+  startAnalysis(fileId, analysisType = 'full') {
+    return api.post('/analysis/analyze', { 
+      file_id: fileId, 
+      analysis_type: analysisType 
+    })
   },
-  
-  // 2. [新增] 获取分析任务状态 (用于轮询)
+
+  /**
+   * 2. 轮询获取分析任务状态和结果
+   */
   getAnalysisStatus(taskId) {
     return api.get(`/analysis/status/${taskId}`)
   },
   
-  // 3. 获取时间线 (后端全量分析可能未包含此数据，保留单独调用)
+  // 3. 获取时间线 (单独获取数据的接口保留，以备不时之需)
   getTimeline(fileId) {
     return api.get(`/analysis/${fileId}/timeline`)
   },
 
-  // (以下单独获取数据的接口保留，以备不时之需)
   getAttackPath(fileId) {
     return api.get(`/analysis/${fileId}/attack-path`)
   },
@@ -76,7 +82,7 @@ export default {
     return api.get(`/analysis/${fileId}/statistics`)
   },
   
-  // --- 流量重放 (保持不变) ---
+  // --- 流量重放 ---
   startReplay(fileId, targetIp = null, speedMultiplier = 1.0, useSandbox = true) {
     return api.post('/replay/start', {
       file_id: fileId,

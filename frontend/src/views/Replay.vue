@@ -56,7 +56,7 @@
           <template #default="{ row }">
             <el-progress
               :percentage="row.progress || 0"
-              :status="row.status === 'failed' ? 'exception' : undefined"
+              :status="row.status === 'failed' ? 'exception' : row.status === 'completed' ? 'success' : undefined"
             />
           </template>
         </el-table-column>
@@ -72,7 +72,7 @@
         </el-table-column>
         <el-table-column label="操作" width="260">
           <template #default="{ row }">
-            <el-button size="small" type="info" @click="viewTaskDetail(row)">详情</el-button>
+            <el-button size="small" type="info" @click="viewTaskDetail(row)">详情/日志</el-button>
             <el-button
               size="small"
               type="danger"
@@ -89,7 +89,7 @@
       </el-table>
     </el-card>
 
-    <el-dialog v-model="detailDialogVisible" title="任务详情" width="60%">
+    <el-dialog v-model="detailDialogVisible" title="任务详情与实时监控" width="70%">
       <el-descriptions :column="2" border v-if="currentTask">
         <el-descriptions-item label="任务ID">
           {{ currentTask.task_id }}
@@ -98,25 +98,32 @@
           <el-tag :type="getStatusType(currentTask.status)">
             {{ getStatusText(currentTask.status) }}
           </el-tag>
+          <span style="margin-left: 10px">{{ currentTask.progress }}%</span>
         </el-descriptions-item>
-        <el-descriptions-item label="PCAP文件">
-          {{ currentTask.pcap_file }}
+        
+        <el-descriptions-item label="发包进度" :span="2">
+          <el-progress 
+            :percentage="currentTask.progress || 0" 
+            :text-inside="true" 
+            :stroke-width="20"
+            :status="currentTask.status === 'failed' ? 'exception' : currentTask.status === 'completed' ? 'success' : ''"
+          />
+          <div style="margin-top: 5px; font-size: 12px; color: #666;">
+            已发送: {{ currentTask.sent_packets }} / {{ currentTask.total_packets }}
+          </div>
         </el-descriptions-item>
-        <el-descriptions-item label="进度">
-          {{ currentTask.progress }}%
+
+        <el-descriptions-item label="终端日志" :span="2">
+          <div class="terminal-container" ref="terminalRef">
+            <div v-if="!currentTask.logs || currentTask.logs.length === 0" class="terminal-empty">
+              [SYSTEM] 正在连接沙箱，等待数据流输出...
+            </div>
+            <div v-for="(log, index) in currentTask.logs" :key="index" class="terminal-line">
+              <span class="prompt">root@sandbox:~#</span> {{ log }}
+            </div>
+          </div>
         </el-descriptions-item>
-        <el-descriptions-item label="已发送数据包">
-          {{ currentTask.sent_packets }}
-        </el-descriptions-item>
-        <el-descriptions-item label="总数据包">
-          {{ currentTask.total_packets }}
-        </el-descriptions-item>
-        <el-descriptions-item label="开始时间">
-          {{ formatTime(currentTask.start_time) }}
-        </el-descriptions-item>
-        <el-descriptions-item label="结束时间">
-          {{ formatTime(currentTask.end_time) }}
-        </el-descriptions-item>
+
         <el-descriptions-item label="错误信息" :span="2" v-if="currentTask.error">
           <el-text type="danger">{{ currentTask.error }}</el-text>
         </el-descriptions-item>
@@ -126,7 +133,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import api from '../api'
@@ -136,6 +143,7 @@ const tasks = ref([])
 const starting = ref(false)
 const detailDialogVisible = ref(false)
 const currentTask = ref(null)
+const terminalRef = ref(null) // 用于控制终端滚动条
 
 const replayForm = ref({
   fileId: '',
@@ -163,10 +171,27 @@ const loadFileList = async () => {
   }
 }
 
+// 滚动到终端底部
+const scrollToBottom = async () => {
+  await nextTick()
+  if (terminalRef.value) {
+    terminalRef.value.scrollTop = terminalRef.value.scrollHeight
+  }
+}
+
 const loadTasks = async () => {
   try {
     const result = await api.listReplayTasks()
     tasks.value = result.tasks || []
+
+    // 【架构级优化】如果弹窗打开着，实时同步最新状态和日志
+    if (detailDialogVisible.value && currentTask.value) {
+      const updatedTask = tasks.value.find(t => t.task_id === currentTask.value.task_id)
+      if (updatedTask) {
+        currentTask.value = updatedTask
+        scrollToBottom() // 每次刷新数据后，日志自动滚到底部
+      }
+    }
   } catch (error) {
     console.error('加载任务列表失败:', error)
   }
@@ -181,7 +206,7 @@ const startReplay = async () => {
   }
   starting.value = true
   try {
-    await api.startReplay(
+    const res = await api.startReplay(
       replayForm.value.fileId,
       replayForm.value.targetIp || null,
       replayForm.value.speedMultiplier,
@@ -189,6 +214,13 @@ const startReplay = async () => {
     )
     ElMessage.success('重放任务已启动')
     await loadTasks()
+    
+    // 自动打开刚刚启动的任务的详情日志界面
+    if (res && res.task_id) {
+      const newTask = tasks.value.find(t => t.task_id === res.task_id) || { task_id: res.task_id, status: 'initializing' }
+      viewTaskDetail(newTask)
+    }
+
   } catch (error) {
     ElMessage.error('启动失败: ' + (error.response?.data?.detail || error.message))
   } finally {
@@ -211,6 +243,7 @@ const deleteTask = async (taskId) => {
     await ElMessageBox.confirm('确定要删除该任务吗？', '警告', { type: 'warning' })
     await api.deleteReplayTask(taskId)
     ElMessage.success('任务已删除')
+    detailDialogVisible.value = false // 如果正在看被删任务的详情，关掉它
     await loadTasks()
   } catch (error) {
     if (error !== 'cancel') ElMessage.error('删除失败')
@@ -220,6 +253,7 @@ const deleteTask = async (taskId) => {
 const viewTaskDetail = (task) => {
   currentTask.value = task
   detailDialogVisible.value = true
+  scrollToBottom()
 }
 
 const canStop = (status) => {
@@ -239,10 +273,13 @@ const getStatusType = (status) => {
 
 const getStatusText = (status) => {
   const texts = {
+    initializing: '初始化',
+    starting: '启动中',
+    preparing: '准备中',
     running: '运行中',
     completed: '已完成',
     failed: '失败',
-    stopped: '已停止',
+    stopped: '已强制停止',
     stopping: '停止中'
   }
   return texts[status] || status
@@ -256,6 +293,7 @@ const formatTime = (timestamp) => {
 onMounted(() => {
   loadFileList()
   loadTasks()
+  // 保持每 3 秒的高频轮询，驱动日志和状态的动画效果
   refreshTimer = setInterval(() => {
     loadTasks()
   }, 3000)
@@ -284,5 +322,51 @@ onUnmounted(() => {
 
 .card-header h3 {
   margin: 0;
+}
+
+/* 终端界面 CSS */
+.terminal-container {
+  background-color: #121212;
+  color: #00ff00; /* 经典的黑客绿 */
+  font-family: 'Consolas', 'Courier New', Courier, monospace;
+  padding: 15px;
+  height: 350px;
+  overflow-y: auto;
+  border-radius: 6px;
+  box-shadow: inset 0 0 10px rgba(0,0,0,0.8);
+  border: 1px solid #333;
+}
+
+.terminal-container::-webkit-scrollbar {
+  width: 8px;
+}
+.terminal-container::-webkit-scrollbar-thumb {
+  background-color: #333;
+  border-radius: 4px;
+}
+
+.terminal-line {
+  line-height: 1.6;
+  font-size: 13px;
+  word-break: break-all;
+  margin-bottom: 2px;
+}
+
+.prompt {
+  color: #00bcd4; /* 命令提示符用青色区分 */
+  font-weight: bold;
+  margin-right: 8px;
+}
+
+.terminal-empty {
+  color: #888;
+  font-style: italic;
+  animation: blink 1.5s infinite;
+}
+
+@keyframes blink {
+  0% { opacity: 1; }
+  50% { opacity: 0.4; }
+  100% { opacity: 1; }
 }
 </style>
